@@ -22,6 +22,10 @@ function pickParams(q?: StaffBookingsQuery): Record<string, string | number> {
   if (q.status) out.status = q.status
   if (q.search) out.search = q.search
   if (q.ordering) out.ordering = q.ordering
+  if (q.station_id) out.station_id = q.station_id
+  if (q.date_from) out.date_from = q.date_from
+  if (q.date_to) out.date_to = q.date_to
+  if (q.service_type) out.service_type = q.service_type
   return out
 }
 

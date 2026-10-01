@@ -1,16 +1,25 @@
 /**
  * Админ-список записей на сервис (v2, по bookings_list_v2.html).
  *
- * Бэк отдаёт голый массив (без пагинации) — счётчики и фильтры считаем на
- * клиенте. Сверху hero-статкарточки (они же быстрые фильтры), под ними
- * поиск + тип услуги, далее таблица (desktop) / карточки (mobile).
+ * Фильтры по СТО, диапазону дат визита и типу услуги уходят НА БЭК
+ * (`station_id`, `date_from`, `date_to`, `service_type` — ручка их давно
+ * поддерживает, мы просто не использовали). Поиск и статус-бакеты остаются
+ * клиентскими: список приходит целым массивом без пагинации, и искать по нему
+ * на месте быстрее, чем гонять запрос на каждую букву.
+ *
+ * Следствие, о котором стоит помнить: hero-счётчики считаются по тому, что
+ * пришло с бэка, то есть внутри выбранных СТО и дат. Это и нужно — «сколько
+ * новых заявок в этом филиале за неделю», а не «вообще по всей базе».
  *
  * Поля — ПЛОСКИЕ (client_name, plate, car_title, service_title, station…),
  * status_label бэк не отдаёт — ярлык из STATUS_META.
  */
 import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useStaffBookingsQuery } from '@/features/admin-bookings/queries'
+import {
+  useStaffBookingsOptionsQuery,
+  useStaffBookingsQuery,
+} from '@/features/admin-bookings/queries'
 import { Card } from '@/shared/ui/Card'
 import { Input } from '@/shared/ui/Input'
 import { Select } from '@/shared/ui/Select'
@@ -53,6 +62,9 @@ export default function AdminBookingsPage() {
   const [bucket, setBucket] = useState<Bucket>('all')
   const [search, setSearch] = useState('')
   const [serviceType, setServiceType] = useState<string>('')
+  const [stationId, setStationId] = useState<string>('')
+  const [dateFrom, setDateFrom] = useState<string>('')
+  const [dateTo, setDateTo] = useState<string>('')
   // Серверная сортировка (ordering) — работает для id/госномера/СТО/created_at.
   // По дате (preferred_date/_time) бэк отдаёт 500, поэтому колонку «Время»
   // сортируем на клиенте (список и так приходит целым массивом). См. BACKEND_NOTES.
@@ -60,7 +72,22 @@ export default function AdminBookingsPage() {
   const [timeDir, setTimeDir] = useState<'' | 'asc' | 'desc'>('')
   const { data, isLoading, isError, refetch } = useStaffBookingsQuery({
     ordering: ordering || undefined,
+    station_id: stationId ? Number(stationId) : undefined,
+    date_from: dateFrom || undefined,
+    date_to: dateTo || undefined,
+    service_type: serviceType || undefined,
   })
+  // Справочник СТО для выпадашки — та же ручка options, что и в детальной.
+  const { data: options } = useStaffBookingsOptionsQuery()
+  const stations = options?.stations ?? []
+  const hasFilters = Boolean(stationId || dateFrom || dateTo || serviceType || search)
+  const resetFilters = () => {
+    setStationId('')
+    setDateFrom('')
+    setDateTo('')
+    setServiceType('')
+    setSearch('')
+  }
   const sort = (field: string) => {
     setTimeDir('')
     setOrdering((prev) => (prev === field ? `-${field}` : prev === `-${field}` ? field : field))
@@ -92,7 +119,6 @@ export default function AdminBookingsPage() {
       if (bucket === 'today' && !isToday(rowTimeIso(r))) return false
       if (bucket === 'no_time' && !(!r.scheduled_datetime && isActive(r.status))) return false
       if (bucket === 'cancelled' && !isCancelled(r.status)) return false
-      if (serviceType && r.service_type !== serviceType) return false
       if (q) {
         const hay = [r.client_name, r.phone, r.plate, r.car_title, r.service_title]
           .map((v) => String(v ?? '').toLowerCase())
@@ -101,7 +127,7 @@ export default function AdminBookingsPage() {
       }
       return true
     })
-  }, [rows, bucket, serviceType, search])
+  }, [rows, bucket, search])
 
   // Клиентская сортировка по времени визита (серверная по дате = 500).
   const displayed = useMemo(() => {
@@ -137,10 +163,10 @@ export default function AdminBookingsPage() {
         <StatCard label="Отменены" value={stats.cancelled} active={bucket === 'cancelled'} onClick={() => setBucket('cancelled')} tone="text-rose-700" />
       </div>
 
-      {/* Поиск + тип услуги */}
+      {/* Фильтры: поиск (клиентский) + СТО, даты визита и тип услуги (серверные) */}
       <Card className="p-4 md:p-5">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3 md:gap-4">
-          <div className="md:col-span-2">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-4">
+          <div className="lg:col-span-2">
             <Input
               label="Поиск"
               placeholder="Имя клиента, госномер, телефон, услуга…"
@@ -148,11 +174,54 @@ export default function AdminBookingsPage() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <Select label="Тип услуги" value={serviceType} onChange={(e) => setServiceType(e.target.value)}>
+
+          <Select label="СТО" value={stationId} onChange={(e) => setStationId(e.target.value)}>
+            <option value="">Все СТО</option>
+            {stations.map((st) => (
+              <option key={st.id} value={st.id}>
+                {st.name ?? st.address ?? `СТО #${st.id}`}
+              </option>
+            ))}
+          </Select>
+
+          <Select
+            label="Тип услуги"
+            value={serviceType}
+            onChange={(e) => setServiceType(e.target.value)}
+          >
             <option value="">Все типы</option>
             <option value="PACKAGE">Пакет</option>
             <option value="DEFAULT">Дефолтная услуга</option>
           </Select>
+
+          {/* Диапазон по дате ВИЗИТА, а не создания заявки: администратору нужно
+              «кто приедет на этой неделе», а не «кто записался». */}
+          <Input
+            label="Визит с"
+            type="date"
+            value={dateFrom}
+            max={dateTo || undefined}
+            onChange={(e) => setDateFrom(e.target.value)}
+          />
+          <Input
+            label="Визит по"
+            type="date"
+            value={dateTo}
+            min={dateFrom || undefined}
+            onChange={(e) => setDateTo(e.target.value)}
+          />
+
+          {hasFilters && (
+            <div className="flex items-end lg:col-span-2">
+              <button
+                type="button"
+                onClick={resetFilters}
+                className="rounded-sct border border-borderLight bg-white px-4 py-2.5 text-[11px] font-900 uppercase tracking-widest text-textSecondary transition-colors hover:border-brandBlue hover:text-brandBlue"
+              >
+                Сбросить фильтры
+              </button>
+            </div>
+          )}
         </div>
       </Card>
 

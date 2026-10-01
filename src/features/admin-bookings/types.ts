@@ -128,6 +128,14 @@ export interface StaffBookingsQuery {
   status?: BookingStatus
   search?: string
   ordering?: string
+  /** ID СТО. Фильтрация на бэке — см. GET /staff_endpoints/bookings/. */
+  station_id?: number
+  /** Начало диапазона даты ВИЗИТА включительно, `YYYY-MM-DD`. */
+  date_from?: string
+  /** Конец диапазона даты ВИЗИТА включительно, `YYYY-MM-DD`. */
+  date_to?: string
+  /** `PACKAGE` — заявки по пакетам, `DEFAULT` — по дефолтным услугам. */
+  service_type?: ServiceType
 }
 
 // === Опции для выбора (GET /staff/bookings/options/) ===
