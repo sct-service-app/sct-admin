@@ -3,9 +3,12 @@
  *
  * Фильтры по СТО, диапазону дат визита и типу услуги уходят НА БЭК
  * (`station_id`, `date_from`, `date_to`, `service_type` — ручка их давно
- * поддерживает, мы просто не использовали). Поиск и статус-бакеты остаются
- * клиентскими: список приходит целым массивом без пагинации, и искать по нему
- * на месте быстрее, чем гонять запрос на каждую букву.
+ * поддерживает, мы просто не использовали). Поиск, статус, бокс и
+ * статус-бакеты — клиентские: список приходит целым массивом без пагинации,
+ * фильтровать его на месте быстрее, чем гонять запрос на каждое изменение.
+ * Бокс к тому же нужно из чего-то выбирать, а ручка options боксов не отдаёт:
+ * варианты собираем из загруженных записей — поэтому сам фильтр по боксу
+ * обязан быть клиентским, иначе список вариантов схлопнется до одного.
  *
  * Следствие, о котором стоит помнить: hero-счётчики считаются по тому, что
  * пришло с бэка, то есть внутри выбранных СТО и дат. Это и нужно — «сколько
@@ -65,6 +68,10 @@ export default function AdminBookingsPage() {
   const [stationId, setStationId] = useState<string>('')
   const [dateFrom, setDateFrom] = useState<string>('')
   const [dateTo, setDateTo] = useState<string>('')
+  // Фильтр по статусу — полный список статусов (карточки сверху покрывают
+  // не все: «Завершена», «В работе», «Не приехал» ими не отобрать).
+  const [status, setStatus] = useState<string>('')
+  const [boxId, setBoxId] = useState<string>('')
   // Серверная сортировка (ordering) — работает для id/госномера/СТО/created_at.
   // По дате (preferred_date/_time) бэк отдаёт 500, поэтому колонку «Время»
   // сортируем на клиенте (список и так приходит целым массивом). См. BACKEND_NOTES.
@@ -80,13 +87,28 @@ export default function AdminBookingsPage() {
   // Справочник СТО для выпадашки — та же ручка options, что и в детальной.
   const { data: options } = useStaffBookingsOptionsQuery()
   const stations = options?.stations ?? []
-  const hasFilters = Boolean(stationId || dateFrom || dateTo || serviceType || search)
+  // Карточка статуса сверху — тоже фильтр: без неё сброс оставлял, например,
+  // «Новые» активными, а кнопка «Сбросить» при этом пропадала.
+  const hasFilters = Boolean(
+    stationId || dateFrom || dateTo || serviceType || search || status || boxId || bucket !== 'all',
+  )
   const resetFilters = () => {
+    setBucket('all')
+    setStatus('')
+    setBoxId('')
     setStationId('')
     setDateFrom('')
     setDateTo('')
     setServiceType('')
     setSearch('')
+  }
+  const pickBucket = (b: Bucket) => {
+    setBucket(b)
+    setStatus('')
+  }
+  const pickStatus = (v: string) => {
+    setStatus(v)
+    setBucket('all')
   }
   const sort = (field: string) => {
     setTimeDir('')
@@ -98,6 +120,20 @@ export default function AdminBookingsPage() {
   }
 
   const rows = useMemo(() => data ?? [], [data])
+
+  // Боксы — из загруженных записей (бэк PR #11; ручка options их не отдаёт).
+  // На бэке без PR #11 поля box нет — тогда и фильтра нет.
+  const boxOptions = useMemo(() => {
+    const byId = new Map<number, string>()
+    for (const r of rows) {
+      if (r.box_id == null || byId.has(r.box_id)) continue
+      const name = boxLabel(r.box, true)
+      if (!name) continue
+      byId.set(r.box_id, stationId ? name : `${r.station || 'СТО'} · ${name}`)
+    }
+    return [...byId.entries()].sort((a, b) => a[1].localeCompare(b[1], 'ru'))
+  }, [rows, stationId])
+  const boxFieldPresent = useMemo(() => rows.some((r) => 'box' in r), [rows])
 
   const stats = useMemo(
     () => ({
@@ -114,6 +150,8 @@ export default function AdminBookingsPage() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return rows.filter((r) => {
+      if (status && r.status !== status) return false
+      if (boxId && String(r.box_id ?? '') !== boxId) return false
       if (bucket === 'new' && r.status !== 'CREATED') return false
       if (bucket === 'confirmed' && r.status !== 'CONFIRMED') return false
       if (bucket === 'today' && !isToday(rowTimeIso(r))) return false
@@ -127,7 +165,7 @@ export default function AdminBookingsPage() {
       }
       return true
     })
-  }, [rows, bucket, search])
+  }, [rows, bucket, search, status, boxId])
 
   // Клиентская сортировка по времени визита (серверная по дате = 500).
   const displayed = useMemo(() => {
@@ -153,14 +191,15 @@ export default function AdminBookingsPage() {
         </p>
       </header>
 
-      {/* Hero-статкарточки = быстрые фильтры */}
+      {/* Hero-статкарточки = быстрые фильтры. Карточка и выпадающий «Статус»
+          фильтруют одно и то же, поэтому выбор одного сбрасывает другое. */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-        <StatCard label="Всего" value={stats.total} active={bucket === 'all'} onClick={() => setBucket('all')} tone="text-textPrimary" />
-        <StatCard label="Новые" value={stats.new} active={bucket === 'new'} onClick={() => setBucket('new')} tone="text-brandBlue" />
-        <StatCard label="Подтверждены" value={stats.confirmed} active={bucket === 'confirmed'} onClick={() => setBucket('confirmed')} tone="text-green-700" />
-        <StatCard label="Сегодня" value={stats.today} active={bucket === 'today'} onClick={() => setBucket('today')} tone="text-indigo-600" />
-        <StatCard label="Без времени" value={stats.no_time} active={bucket === 'no_time'} onClick={() => setBucket('no_time')} tone="text-amber-700" />
-        <StatCard label="Отменены" value={stats.cancelled} active={bucket === 'cancelled'} onClick={() => setBucket('cancelled')} tone="text-rose-700" />
+        <StatCard label="Всего" value={stats.total} active={bucket === 'all'} onClick={() => pickBucket('all')} tone="text-textPrimary" />
+        <StatCard label="Новые" value={stats.new} active={bucket === 'new'} onClick={() => pickBucket('new')} tone="text-brandBlue" />
+        <StatCard label="Подтверждены" value={stats.confirmed} active={bucket === 'confirmed'} onClick={() => pickBucket('confirmed')} tone="text-green-700" />
+        <StatCard label="Сегодня" value={stats.today} active={bucket === 'today'} onClick={() => pickBucket('today')} tone="text-indigo-600" />
+        <StatCard label="Без времени" value={stats.no_time} active={bucket === 'no_time'} onClick={() => pickBucket('no_time')} tone="text-amber-700" />
+        <StatCard label="Отменены" value={stats.cancelled} active={bucket === 'cancelled'} onClick={() => pickBucket('cancelled')} tone="text-rose-700" />
       </div>
 
       {/* Фильтры: поиск (клиентский) + СТО, даты визита и тип услуги (серверные) */}
@@ -193,6 +232,26 @@ export default function AdminBookingsPage() {
             <option value="PACKAGE">Пакет</option>
             <option value="DEFAULT">Дефолтная услуга</option>
           </Select>
+
+          <Select label="Статус" value={status} onChange={(e) => pickStatus(e.target.value)}>
+            <option value="">Все статусы</option>
+            {Object.entries(STATUS_META).map(([value, meta]) => (
+              <option key={value} value={value}>
+                {meta.label}
+              </option>
+            ))}
+          </Select>
+
+          {boxFieldPresent && (
+            <Select label="Бокс" value={boxId} onChange={(e) => setBoxId(e.target.value)}>
+              <option value="">Все боксы</option>
+              {boxOptions.map(([id, label]) => (
+                <option key={id} value={id}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          )}
 
           {/* Диапазон по дате ВИЗИТА, а не создания заявки: администратору нужно
               «кто приедет на этой неделе», а не «кто записался». */}
@@ -266,7 +325,7 @@ export default function AdminBookingsPage() {
                         )}
                       >
                         Время
-                        {timeDir && <span>{timeDir === 'asc' ? '↑' : '↓'}</span>}
+                        <SortIcon dir={timeDir === 'asc' ? '↑' : timeDir === 'desc' ? '↓' : ''} />
                       </button>
                     </th>
                     <SortTh label="СТО" field="service_station__name" ordering={ordering} onSort={sort} />
@@ -289,6 +348,18 @@ export default function AdminBookingsPage() {
         )}
       </Card>
     </section>
+  )
+}
+
+/**
+ * Значок сортировки. Неактивный ↕ виден всегда — раньше стрелка появлялась
+ * только после клика, и было не догадаться, что по столбцу можно сортировать.
+ */
+function SortIcon({ dir }: { dir: string }) {
+  return (
+    <span aria-hidden className={cn('text-[11px] leading-none', dir ? '' : 'text-textSecondary/40')}>
+      {dir || '↕'}
+    </span>
   )
 }
 
@@ -315,7 +386,7 @@ function SortTh({
         )}
       >
         {label}
-        {dir && <span>{dir}</span>}
+        <SortIcon dir={dir} />
       </button>
     </th>
   )
