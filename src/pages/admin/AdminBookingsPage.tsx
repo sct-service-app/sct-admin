@@ -26,7 +26,7 @@ import { Select } from '@/shared/ui/Select'
 import { Spinner } from '@/shared/ui/Spinner'
 import { cn } from '@/shared/lib/cn'
 import { formatDateTime, formatMoney } from '@/shared/lib/format'
-import type { StaffBookingListRow } from '@/features/admin-bookings/types'
+import { boxLabel, type StaffBookingListRow } from '@/features/admin-bookings/types'
 
 const STATUS_META: Record<string, { label: string; tone: string }> = {
   DRAFT: { label: 'Черновик', tone: 'bg-surfaceMuted text-textSecondary' },
@@ -410,7 +410,15 @@ function BookingRow({ r }: { r: StaffBookingListRow }) {
       </td>
       <td className="px-5 py-4 font-bold text-textPrimary">{priceText(r)}</td>
       <td className={cn('px-5 py-4', t.muted ? 'text-amber-700' : 'text-textPrimary')}>{t.text}</td>
-      <td className="px-5 py-4 text-textPrimary">{r.station || 'Не выбрано'}</td>
+      <td className="px-5 py-4 text-textPrimary">
+        {r.station || 'Не выбрано'}
+        {/* Бокс назначает бэк (PR #11); у старых записей его нет. */}
+        {boxLabel(r.box) ? (
+          <span className="mt-0.5 block text-[11px] font-bold uppercase tracking-widest text-brandBlue">
+            {boxLabel(r.box)}
+          </span>
+        ) : null}
+      </td>
       <td className="px-5 py-4 text-textSecondary">{r.created_at ? formatDateTime(r.created_at) : '—'}</td>
     </tr>
   )

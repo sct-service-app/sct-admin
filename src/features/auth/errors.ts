@@ -49,6 +49,10 @@ const TRANSLATIONS: Array<[RegExp | string, Translator]> = [
   ['Enter a valid email address.', 'Введите корректный email.'],
   [/^Ensure this field has no more than (\d+) characters/i, (m) => `Не больше ${m[1]} символов.`],
   [/^Ensure this field has at least (\d+) characters/i, (m) => `Минимум ${m[1]} символов.`],
+  // Числовые границы (DRF min_value / max_value) — напр. пробег: бэк требует >= 1.
+  [/^Ensure this value is greater than or equal to (\d+)/i, (m) => `Значение должно быть не меньше ${m[1]}.`],
+  [/^Ensure this value is less than or equal to (\d+)/i, (m) => `Значение должно быть не больше ${m[1]}.`],
+  ['A valid integer is required.', 'Введите целое число.'],
 ]
 
 export function translateApiMessage(msg: string): string {
@@ -77,25 +81,66 @@ export interface ParsedApiError {
   general: string | null
   /** Ошибки по полям — отдаём в RHF setError(name, { message }). */
   fields: Record<string, string>
+  /**
+   * Машиночитаемый код из конверта бэка (`error.code`): `conflict`,
+   * `validation_error`, `registration_verification_unavailable`…
+   * По нему ветвим логику, не разбирая русский текст сообщения.
+   */
+  code: string | null
+  /** HTTP-статус ответа — null, если ответа не было (сеть/таймаут). */
+  status: number | null
+  /**
+   * Коды ошибок по полям. Бэк (с PR #11) шлёт по полю не только строку, но и
+   * объект `{code, message}` — например
+   * `preferred_datetime: {code: "BOOKING_SLOT_UNAVAILABLE", message: "…"}`.
+   * Текст из `message` уходит в `fields`, код — сюда.
+   */
+  fieldCodes: Record<string, string>
 }
 
-function joinList(value: unknown): string | null {
+/** Одно сообщение: строка или объект `{code, message}`. */
+function messageOf(value: unknown): string | null {
   if (typeof value === 'string') return translateApiMessage(value)
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const msg = (value as Record<string, unknown>).message
+    if (typeof msg === 'string' && msg) return translateApiMessage(msg)
+  }
+  return null
+}
+
+/** Значение поля ошибки: строка, объект `{code, message}` или массив из них. */
+function joinList(value: unknown): string | null {
   if (Array.isArray(value)) {
-    const parts = value
-      .filter((v): v is string => typeof v === 'string')
-      .map(translateApiMessage)
+    const parts = value.map(messageOf).filter((v): v is string => Boolean(v))
     return parts.length ? parts.join(' ') : null
+  }
+  return messageOf(value)
+}
+
+/** Машиночитаемый код из `{code, message}` (или первого такого в массиве). */
+function codeOf(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      const c = codeOf(v)
+      if (c) return c
+    }
+    return null
+  }
+  if (value && typeof value === 'object') {
+    const c = (value as Record<string, unknown>).code
+    if (typeof c === 'string' && c) return c
   }
   return null
 }
 
 export function parseApiError(err: unknown, fallback: string): ParsedApiError {
   const fields: Record<string, string> = {}
+  const fieldCodes: Record<string, string> = {}
   let general: string | null = null
+  let code: string | null = null
 
   if (!(err instanceof AxiosError)) {
-    return { general: fallback, fields }
+    return { general: fallback, fields, code: null, status: null, fieldCodes }
   }
 
   // Сетевые / таймаут / CORS — нет response.
@@ -105,6 +150,9 @@ export function parseApiError(err: unknown, fallback: string): ParsedApiError {
         ? 'Превышено время ожидания ответа сервера.'
         : 'Не удалось связаться с сервером. Проверьте интернет.',
       fields,
+      code: null,
+      status: null,
+      fieldCodes,
     }
   }
 
@@ -122,25 +170,38 @@ export function parseApiError(err: unknown, fallback: string): ParsedApiError {
     if (envelope && typeof envelope === 'object' && !Array.isArray(envelope)) {
       // Новый единый обработчик ошибок бэка:
       //   { success:false, error:{ code, message, field, details } }
-      // message обычно уже на русском; details — DRF-карта {поле:[сообщения]}.
+      // `message` часто — общая КАТЕГОРИЯ ошибки («Ошибка авторизации
+      // клиента.», «Ошибка валидации.»), а конкретика лежит в
+      // details.non_field_errors / details.detail. Раньше мы склеивали их
+      // и получалось «Ошибка X. <настоящее сообщение>» — мусорный префикс.
+      // Теперь: есть конкретное non_field/detail сообщение → показываем
+      // только его; общий `message` держим как фолбэк, когда конкретики нет.
       const e = envelope as Record<string, unknown>
-      if (typeof e.message === 'string') general = translateApiMessage(e.message)
+      if (typeof e.code === 'string') code = e.code
+      const envelopeMessage =
+        typeof e.message === 'string' ? translateApiMessage(e.message) : null
 
       const details = e.details
+      const generalParts: string[] = []
+
       if (Array.isArray(details)) {
         const msg = joinList(details)
-        if (msg) general = general ? `${general} ${msg}` : msg
+        if (msg) generalParts.push(msg)
       } else if (details && typeof details === 'object') {
         for (const [key, value] of Object.entries(details as Record<string, unknown>)) {
+          const fieldCode = codeOf(value)
+          if (fieldCode) fieldCodes[key] = fieldCode
           const msg = joinList(value)
           if (!msg) continue
           if (key === 'non_field_errors' || key === 'detail') {
-            general = general ? `${general} ${msg}` : msg
+            generalParts.push(msg)
           } else {
             fields[key] = msg
           }
         }
       }
+
+      general = generalParts.length ? generalParts.join(' ') : envelopeMessage
     } else {
       // Старый DRF-формат (немигрированные ручки / прочие API).
       if (typeof obj.detail === 'string') {
@@ -154,6 +215,8 @@ export function parseApiError(err: unknown, fallback: string): ParsedApiError {
 
       for (const [key, value] of Object.entries(obj)) {
         if (key === 'detail' || key === 'non_field_errors') continue
+        const fieldCode = codeOf(value)
+        if (fieldCode) fieldCodes[key] = fieldCode
         const msg = joinList(value)
         if (msg) fields[key] = msg
       }
@@ -164,7 +227,16 @@ export function parseApiError(err: unknown, fallback: string): ParsedApiError {
     general = status >= 500 ? 'Ошибка сервера. Попробуйте позже.' : fallback
   }
 
-  return { general, fields }
+  return { general, fields, code, status, fieldCodes }
+}
+
+/**
+ * Есть ли среди ошибки нужный код — в конверте (`error.code`) или по
+ * любому полю (`preferred_datetime: {code, …}`). Где именно бэк положит код
+ * брони, до конца не известно, поэтому смотрим везде.
+ */
+export function hasApiErrorCode(parsed: ParsedApiError, wanted: string): boolean {
+  return parsed.code === wanted || Object.values(parsed.fieldCodes).includes(wanted)
 }
 
 /**

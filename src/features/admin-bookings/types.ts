@@ -46,9 +46,26 @@ export interface StaffBookingListRow {
   scheduled_datetime: string | null
   station?: string
   station_id?: number | null
+  /** Бокс (бэк PR #11) — см. `StaffBookingBox`. */
+  box?: StaffBookingBox
+  box_id?: number | null
+  duration_minutes?: number | null
+  scheduled_end_datetime?: string | null
   created_at: string
   [key: string]: unknown
 }
+
+/**
+ * Бокс записи (бэк PR #11). Бокс выбирает бэк сам — при создании и при
+ * переносе времени/СТО сотрудником; руками его не назначаем. На sandbox
+ * (21.10.2026) и список, и detail отдают объект `{id, number, name}`, где
+ * `name` — профиль бокса («Замена масла в двигателе»), а не «Бокс №1».
+ * Схема описывает поле строкой — поддерживаем и её. У старых записей null.
+ */
+export type StaffBookingBox =
+  | string
+  | { id?: number; number?: number | null; name?: string | null }
+  | null
 
 /** Вложенные объекты detail-ответа. */
 export interface StaffBookingClient {
@@ -104,6 +121,11 @@ export interface StaffBookingDetail {
   station?: string
   station_id?: number | null
   display_address?: string
+  box?: StaffBookingBox
+  box_id?: number | null
+  /** Длительность и конец визита (PR #11); у старых записей null. */
+  duration_minutes?: number | null
+  scheduled_end_datetime?: string | null
   // Пробег (в API только mileage_km; *_recorded_at/source/comment отсутствуют)
   mileage_km?: number | string | null
   // Время
@@ -195,4 +217,18 @@ export interface StaffBookingPatch {
 
 export interface CancelPayload {
   cancel_reason?: string
+}
+
+/**
+ * Подпись бокса. Коротко — «Бокс №1» (список); полностью — «Бокс №1 · Замена
+ * масла в двигателе» (карточка записи). Одно `name` без номера легко принять
+ * за услугу, поэтому номер всегда впереди. Нет бокса — null.
+ */
+export function boxLabel(box: StaffBookingBox | undefined, full = false): string | null {
+  if (!box) return null
+  if (typeof box === 'string') return box.trim() || null
+  const num = box.number != null ? `Бокс №${box.number}` : null
+  const name = box.name?.trim() || null
+  if (!num) return name
+  return full && name ? `${num} · ${name}` : num
 }

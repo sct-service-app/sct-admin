@@ -26,10 +26,10 @@ import { SearchableSelect } from '@/shared/ui/SearchableSelect'
 import { Textarea } from '@/shared/ui/Textarea'
 import { Spinner } from '@/shared/ui/Spinner'
 import { toast } from '@/shared/ui/Toast'
-import { parseApiError } from '@/features/auth/errors'
+import { hasApiErrorCode, parseApiError } from '@/features/auth/errors'
 import { formatDateTime, formatMoney } from '@/shared/lib/format'
 import { cn } from '@/shared/lib/cn'
-import type { StaffBookingDetail, StaffBookingPatch } from '@/features/admin-bookings/types'
+import { boxLabel, type StaffBookingDetail, type StaffBookingPatch } from '@/features/admin-bookings/types'
 
 const STATUS_META: Record<string, { label: string; tone: string }> = {
   DRAFT: { label: 'Черновик', tone: 'bg-surfaceMuted text-textSecondary' },
@@ -232,7 +232,17 @@ export default function AdminBookingDetailPage() {
         initialRef.current = { ...form }
         toast.success('Изменения сохранены')
       },
-      onError: (e) => toast.error(parseApiError(e, 'Не удалось сохранить.').general),
+      onError: (e) => {
+        const parsed = parseApiError(e, 'Не удалось сохранить.')
+        // Бэк PR #11 сам перераспределяет бокс при переносе времени/СТО. Нет
+        // свободного бокса — ошибка приходит по полю scheduled_datetime
+        // объектом {code, message}, а общий текст там просто «Ошибка валидации.».
+        if (hasApiErrorCode(parsed, 'BOOKING_SLOT_UNAVAILABLE')) {
+          toast.error('На это время нет свободных боксов. Выберите другое время или СТО.')
+          return
+        }
+        toast.error(parsed.fields.scheduled_datetime ?? parsed.fields.service_station_id ?? parsed.general)
+      },
     })
   }
 
@@ -272,6 +282,19 @@ export default function AdminBookingDetailPage() {
     options?.stations.find((s) => String(s.id) === form.service_station_id)?.label ??
     data.station ??
     'Не выбрано'
+  // Бокс назначает бэк (PR #11). Показываем то, что сохранено на сервере:
+  // после сохранения переноса карточка перезапрашивается и бокс обновится.
+  // Поля `box` нет вовсе — бэк ещё без PR #11 (прод до деплоя): карточку не
+  // показываем, иначе у всех записей было бы «Не назначен».
+  const hasBoxField = 'box' in data
+  const heroBox = boxLabel(data.box) ?? 'Не назначен'
+  // Профиль бокса («Замена масла в двигателе») — второй строкой: целиком
+  // «Бокс №1 · …» в карточку шапки не влезает и обрезается.
+  const heroBoxHint =
+    data.box && typeof data.box === 'object' && data.box.name && data.box.number != null ? data.box.name : undefined
+  const endTime = data.scheduled_end_datetime
+    ? new Date(data.scheduled_end_datetime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+    : null
 
   return (
     <section className="space-y-6">
@@ -302,10 +325,11 @@ export default function AdminBookingDetailPage() {
             {meta?.label ?? form.status}
           </span>
         </div>
-        <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <div className={cn('mt-5 grid grid-cols-2 gap-3', hasBoxField ? 'md:grid-cols-5' : 'md:grid-cols-4')}>
           <HeroCard label="Статус" value={meta?.label ?? form.status} />
           <HeroCard label="Дата визита" value={heroDate} />
           <HeroCard label="СТО" value={heroStation} />
+          {hasBoxField ? <HeroCard label="Бокс" value={heroBox} hint={heroBoxHint} /> : null}
           <HeroCard label="Пробег" value={form.mileage_km ? `${Number(form.mileage_km).toLocaleString('ru-RU')} км` : '—'} />
         </div>
       </div>
@@ -325,6 +349,13 @@ export default function AdminBookingDetailPage() {
                 {data.preferred_datetime ? formatDateTime(data.preferred_datetime) : '—'}
               </span>
             </p>
+            {endTime || data.duration_minutes ? (
+              <p className="mt-1 text-[11px] font-medium text-textSecondary">
+                Бокс освободится:{' '}
+                <span className="font-bold text-textPrimary">{endTime ?? '—'}</span>
+                {data.duration_minutes ? <> · услуга {data.duration_minutes} мин</> : null}
+              </p>
+            ) : null}
           </Card>
 
           <Card className="p-5 md:p-6">
@@ -495,11 +526,16 @@ function SectionTitle({ children, danger }: { children: React.ReactNode; danger?
   )
 }
 
-function HeroCard({ label, value }: { label: string; value: string }) {
+function HeroCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded-sct bg-white/5 p-3">
       <p className="text-[10px] font-900 uppercase tracking-widest text-white/40">{label}</p>
       <p className="mt-1 truncate text-sm font-900 text-white">{value}</p>
+      {hint ? (
+        <p className="mt-0.5 truncate text-[11px] font-medium text-white/60" title={hint}>
+          {hint}
+        </p>
+      ) : null}
     </div>
   )
 }
